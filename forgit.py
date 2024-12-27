@@ -1,3 +1,7 @@
+import os
+import logging
+from datetime import timedelta
+from typing import Tuple, Optional, Dict, List
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -8,11 +12,9 @@ import tensorflow as tf
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from datetime import timedelta
-import logging
 import ta
-from typing import Tuple, Optional, Dict, List
-import os
+from scipy import stats
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 import plotly.graph_objs as go
 
@@ -30,55 +32,6 @@ def cached_fetch_data(pair: str, start_date: str, end_date: str, interval: str =
 
 
 class ForexPredictionApp:
-    def fetch_data(self, pair: str, start_date: str, end_date: str, interval: str = '1d') -> Optional[pd.DataFrame]:
-        """
-        Fetch and validate forex data.
-
-        Args:
-            pair: Currency pair (e.g., 'EURUSD')
-            start_date: Start date for data fetch
-            end_date: End date for data fetch
-            interval: Data interval ('1d', '1h', '15m', '5m')
-
-        Returns:
-            Optional[pd.DataFrame]: Processed DataFrame or None if error occurs
-        """
-        try:
-            # Validate inputs
-            pair = self.validate_pair(pair)
-            start_date, end_date = self.validate_dates(start_date, end_date)
-            interval = self.validate_interval(interval)
-
-            symbol = f"{pair[0:3]}{pair[3:6]}=X"
-            self.logger.info(f"Fetching data for {symbol} from {start_date} to {end_date}")
-
-            # Use cached data fetching
-            data = cached_fetch_data(pair, start_date, end_date, interval)
-
-            # Validate the fetched data
-            if self.validate_data(data):
-                # Add technical indicators
-                processed_data = self.add_technical_indicators(data)
-
-                # Verify all required features are present
-                missing_features = [col for col in self.feature_columns if col not in processed_data.columns]
-                if missing_features:
-                    raise ValueError(f"Missing required features after processing: {missing_features}")
-
-                return processed_data
-
-            return None
-
-        except ValueError as e:
-            self.logger.error(f"Validation error in fetch_data: {str(e)}")
-            st.error(str(e))
-            return None
-
-        except Exception as e:
-            self.logger.error(f"Unexpected error in fetch_data: {str(e)}")
-            st.error("An unexpected error occurred while fetching data. Please check the logs for details.")
-            return None
-
     """A Streamlit application for predicting Forex currency pair movements."""
 
     def __init__(self):
@@ -87,7 +40,7 @@ class ForexPredictionApp:
         self.feature_columns = [
             'Close', 'SMA', 'EMA', 'RSI', 'MACD',
             'BB_upper', 'BB_lower', 'ATR', 'OBV',
-            'ROC', 'VWAP'  # Added new technical indicators
+            'ROC', 'VWAP'
         ]
         self.scaler = MinMaxScaler()
         self.model = None  # Initialize model only when needed
@@ -97,7 +50,7 @@ class ForexPredictionApp:
             'USDJPY': 'USD/JPY',
             'AUDUSD': 'AUD/USD',
             'USDCAD': 'USD/CAD',
-            'EURGBP': 'EUR/GBP',  # Added more currency pairs
+            'EURGBP': 'EUR/GBP',
             'EURJPY': 'EUR/JPY',
             'GBPJPY': 'GBP/JPY'
         }
@@ -105,7 +58,7 @@ class ForexPredictionApp:
             '1d': '1 day',
             '1h': '1 hour',
             '15m': '15 minutes',
-            '5m': '5 minutes'  # Added more granular timeframe
+            '5m': '5 minutes'
         }
         self.model_dir = 'models'
         os.makedirs(self.model_dir, exist_ok=True)
@@ -159,14 +112,13 @@ class ForexPredictionApp:
         model.compile(
             optimizer=optimizer,
             loss='huber',
-            metrics=['mae', 'mse']  # Added metrics for better monitoring
+            metrics=['mae', 'mse']
         )
         return model
 
     def add_technical_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
         """Enhanced technical indicator calculation with error handling."""
         try:
-            # Existing indicators
             data['SMA'] = ta.trend.sma_indicator(data['Close'], window=14)
             data['EMA'] = ta.trend.ema_indicator(data['Close'], window=14)
             data['RSI'] = ta.momentum.rsi(data['Close'], window=14)
@@ -181,11 +133,9 @@ class ForexPredictionApp:
             data['ATR'] = ta.volatility.average_true_range(data['High'], data['Low'], data['Close'])
             data['OBV'] = ta.volume.on_balance_volume(data['Close'], data['Volume'])
 
-            # New indicators
             data['ROC'] = ta.momentum.roc(data['Close'], window=12)
             data['VWAP'] = (data['Close'] * data['Volume']).cumsum() / data['Volume'].cumsum()
 
-            # Handle missing values more robustly
             for col in data.columns:
                 if data[col].isnull().any():
                     data[col] = data[col].fillna(method='ffill').fillna(method='bfill')
@@ -284,7 +234,6 @@ class ForexPredictionApp:
             if missing_features:
                 raise ValueError(f"Missing features: {missing_features}")
 
-            # Scale the features
             feature_data = data[self.feature_columns].values
             scaled_data = self.scaler.fit_transform(feature_data)
 
@@ -310,9 +259,12 @@ class ForexPredictionApp:
 
             predictions = self.model.predict(X)
 
+            # Flatten the predictions array to ensure it is 1-dimensional
+            predictions = predictions.flatten()
+
             # Create a dummy array with the same number of features as the original data
             dummy_array = np.zeros((len(predictions), len(self.feature_columns)))
-            dummy_array[:, 0] = predictions.flatten()  # Put predictions in the first column
+            dummy_array[:, 0] = predictions  # Put predictions in the first column
 
             # Inverse transform the entire dummy array
             inverse_transformed = self.scaler.inverse_transform(dummy_array)
@@ -324,11 +276,53 @@ class ForexPredictionApp:
             self.logger.error(f"Error in make_prediction: {str(e)}")
             raise
 
+    def fetch_data(self, pair: str, start_date: str, end_date: str, interval: str = '1d') -> Optional[pd.DataFrame]:
+        """
+        Fetch and validate forex data.
+
+        Args:
+            pair: Currency pair (e.g., 'EURUSD')
+            start_date: Start date for data fetch
+            end_date: End date for data fetch
+            interval: Data interval ('1d', '1h', '15m', '5m')
+
+        Returns:
+            Optional[pd.DataFrame]: Processed DataFrame or None if error occurs
+        """
+        try:
+            pair = self.validate_pair(pair)
+            start_date, end_date = self.validate_dates(start_date, end_date)
+            interval = self.validate_interval(interval)
+
+            symbol = f"{pair[0:3]}{pair[3:6]}=X"
+            self.logger.info(f"Fetching data for {symbol} from {start_date} to {end_date}")
+
+            data = cached_fetch_data(pair, start_date, end_date, interval)
+
+            if self.validate_data(data):
+                processed_data = self.add_technical_indicators(data)
+
+                missing_features = [col for col in self.feature_columns if col not in processed_data.columns]
+                if missing_features:
+                    raise ValueError(f"Missing required features after processing: {missing_features}")
+
+                return processed_data
+
+            return None
+
+        except ValueError as e:
+            self.logger.error(f"Validation error in fetch_data: {str(e)}")
+            st.error(str(e))
+            return None
+
+        except Exception as e:
+            self.logger.error(f"Unexpected error in fetch_data: {str(e)}")
+            st.error("An unexpected error occurred while fetching data. Please check the logs for details.")
+
 
 def main():
     st.set_page_config(page_title="Forex Prediction Pro", layout="wide")
 
-    # Add CSS for better styling
     st.markdown("""
         <style>
         .stButton>button {
@@ -346,7 +340,6 @@ def main():
 
     app = ForexPredictionApp()
 
-    # Create tabs for different sections
     tab1, tab2, tab3 = st.tabs(["Prediction", "Analysis", "Settings"])
 
     with tab1:
@@ -369,7 +362,6 @@ def main():
                     if data is not None:
                         X, y = app.prepare_data(data)
 
-                        # Display interactive charts
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(
                             x=data.index,
@@ -379,13 +371,11 @@ def main():
                         ))
                         st.plotly_chart(fig)
 
-                        # Show predictions with confidence intervals
                         predictions = app.make_prediction(X)
                         lower_bound, upper_bound = app.prepare_prediction_interval(predictions)
 
                         metrics = app.evaluate_model(X[-len(predictions):], y[-len(predictions):])
 
-                        # Display metrics in cards
                         col1, col2, col3 = st.columns(3)
                         with col1:
                             st.metric("MAE", f"{metrics['mae']:.4f}")
